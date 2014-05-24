@@ -1,48 +1,66 @@
 import socket
 
-def encryptAddr(addrT):
-    ret = str(socket.inet_aton(addrT[0])) + str(addrT[1])
-    return ret
+class Server():
+    '''
+    the uhp server class
+    '''
 
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.bind(('', 20020))
-
-Queue = []
-i = 0
-while i < 2:
-    data, addr = s.recvfrom(4096)
-    if data != '\x01':
-        continue
-    s.sendto('\x02',addr)
-    print(addr)
-    Queue.append(addr)
-    i += 1
-
-print(Queue)
-
-dataToSend = {Queue[0]:encryptAddr(Queue[1]),Queue[1]:encryptAddr(Queue[0])}
-
-for i in dataToSend.keys():
-    s.sendto(dataToSend[i], i)
-
-s.settimeout(2)  
-while True:
-    b = len(dataToSend)
-    if b == 0:
-        break
-    for i in xrange(b):
-        try:
-            data, addr1 = s.recvfrom(1024)
-            if data == '\x03':
-                print(dataToSend)
-                del dataToSend[addr1]
-                print('removing... ')
-        except:
-            print('retrying ')
-    print(dataToSend)
-    for i in dataToSend.keys():
-        s.sendto(dataToSend[i], i)
+    def __init__(self, port):
+        self.sUdp = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+        self.sUdp.bind('', port)
+        self.sUdp.settimeout(3)
+        self.pools = {}
+        self.ipsToHandle = {}
+        self.alive = True
+    
+    def pack_addr(self, addr):
+        return str(socket.inet_aton(addr[0])) + str(addr[1])
+    
+    def handle_ack(self, addr):
+        self.ipsToHandle[addr] = 1
+        result = self.sUdp.sendto('\x02', addr) == 1
+        if(result):
+            self.ipsToHandle[addr] = 2
+        return result
+    
+    def pool_connect(self, pool, addr):
+        if addr in self.ipsToHandle:
+            if self.ipsToHandle[addr] == 2:
+                if pool in self.pools:
+                    self.pools[pool].append(addr)
+                else:
+                    self.pools[pool] = [addr]
+                result = self.sUdp.sendto('\x04' + str(pool), addr) == len(pool)+1
+                if(result):
+                    self.ipsToHandle[addr] = 4
+        return result
+    
+    def pool_handler(self, pool):
+        cur_pool = self.pools[pool]
+        if len(cur_pool) == 2:
+            result = self.sUdp.sendto(self.pack_addr(cur_pool[0]), cur_pool[1])
+            if(result != len(self.pack_addr(cur_pool[0]))):
+                raise socket.error("pool handler: " + cur_pool[1])
+            result = self.sUdp.sendto(self.pack_addr(cur_pool[1]), cur_pool[0])
+            if(result != len(self.pack_addr(cur_pool[1]))):
+                raise socket.error("pool handler: " + cur_pool[0])
+        return True
+    
+    def main(self):
+        while self.alive:
+            try:
+                data, addr = self.sUdp.recvfrom(256)
+                if(data == '\x01'):
+                    if(self.handle_ack(addr)):
+                        raise socket.error("Send acknowledge error: " + str(addr))
+                elif(str(data).startswith('\x03')):
+                    if(self.pool_connect(data[1:], addr)):
+                        raise socket.error("Send acknowledge on pool: " + str(addr))
+            except socket.timeout:
+                map(self.pool_handler(), self.pools.keys())
             
-    
-    
+            
+            
+                
 
+        
