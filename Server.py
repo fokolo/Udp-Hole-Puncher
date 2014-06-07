@@ -1,66 +1,108 @@
 import socket
+from PoolHandler import PoolHandle
+import threading
 
-class Server():
+
+class UhpServer():
     '''
-    the uhp server class
+    docstring the uhp server class
     '''
 
     def __init__(self, port):
-        self.sUdp = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-        self.sUdp.bind('', port)
-        self.sUdp.settimeout(3)
+        self.udp_sock = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
         self.pools = {}
-        self.ipsToHandle = {}
+        self.address_status = {}
+        self.send_queue = []
+        self.udp_sock.bind(('', port))
+        self.pool_handle_thread = threading.Thread(target=self.pool_handler, name='pool_handle')
+        self.receive_handle_thread = threading.Thread(target=self.receive_handle, name='recv')
+        self.send_handle_thread = threading.Thread(target=self.send_handle, name='send')
         self.alive = True
-    
-    def pack_addr(self, addr):
-        return str(socket.inet_aton(addr[0])) + str(addr[1])
-    
+
     def handle_ack(self, addr):
-        self.ipsToHandle[addr] = 1
-        result = self.sUdp.sendto('\x02', addr) == 1
-        if(result):
-            self.ipsToHandle[addr] = 2
-        return result
-    
-    def pool_connect(self, pool, addr):
-        if addr in self.ipsToHandle:
-            if self.ipsToHandle[addr] == 2:
-                if pool in self.pools:
-                    self.pools[pool].append(addr)
-                else:
-                    self.pools[pool] = [addr]
-                result = self.sUdp.sendto('\x04' + str(pool), addr) == len(pool)+1
-                if(result):
-                    self.ipsToHandle[addr] = 4
-        return result
-    
-    def pool_handler(self, pool):
-        cur_pool = self.pools[pool]
-        if len(cur_pool) == 2:
-            result = self.sUdp.sendto(self.pack_addr(cur_pool[0]), cur_pool[1])
-            if(result != len(self.pack_addr(cur_pool[0]))):
-                raise socket.error("pool handler: " + cur_pool[1])
-            result = self.sUdp.sendto(self.pack_addr(cur_pool[1]), cur_pool[0])
-            if(result != len(self.pack_addr(cur_pool[1]))):
-                raise socket.error("pool handler: " + cur_pool[0])
+        print('acknowledging connections')
+        try:
+            self.address_status[addr] = 1
+            self.send_queue.append(tuple(('\x02', addr)))
+            self.address_status[addr] = 2
+        except:
+            raise
         return True
     
-    def main(self):
+    def pool_connect(self, pool, addr):
+        try:
+            if addr in self.address_status:
+                if self.address_status[addr] == 2:
+                    print(pool in self.pools)
+                    if pool in self.pools:
+                        if not self.pools[pool].is_member(addr):
+                            print('pool adding')
+                            self.pools[pool].add_member(addr)
+                            self.send_queue.append(tuple(('\x04' + str(pool), addr)))
+                    elif pool not in self.pools:
+                        print('pool adding')
+                        self.pools[pool] = PoolHandle('p2p', pool, self.udp_sock)
+                        self.pools[pool].add_member(addr)
+                        self.send_queue.append(tuple(('\x04' + str(pool), addr)))
+        except:
+            raise
+        return True
+    
+    def pool_handler(self):
         while self.alive:
             try:
-                data, addr = self.sUdp.recvfrom(256)
-                if(data == '\x01'):
-                    if(self.handle_ack(addr)):
-                        raise socket.error("Send acknowledge error: " + str(addr))
-                elif(str(data).startswith('\x03')):
-                    if(self.pool_connect(data[1:], addr)):
-                        raise socket.error("Send acknowledge on pool: " + str(addr))
-            except socket.timeout:
-                map(self.pool_handler(), self.pools.keys())
-            
-            
-            
-                
+                for pool in self.pools.values():
+                    pool_t = pool.pool_type
+                    if pool_t == 'p2p':
+                        result = pool.send_addr_p2p()
+                        if len(result) == 2:
+                            pool.pool_members = []
+                            self.send_queue += result
+            except socket.error:
+                raise
+            except KeyboardInterrupt:
+                raise
 
-        
+    def receive_handle(self):
+        while self.alive:
+            try:
+                data, addr = self.udp_sock.recvfrom(256)
+                print("**", data, addr)
+                if data == '\x01':
+                    if not self.handle_ack(addr):
+                        raise socket.error("Send acknowledge error: " + str(addr))
+                elif str(data).startswith('\x03'):
+                    if not self.pool_connect(data[1:], addr):
+                        raise socket.error("Send acknowledge on pool: " + str(addr))
+            except socket.error:
+                raise
+            except KeyboardInterrupt:
+                raise
+
+    def send_handle(self):
+        while self.alive:
+            try:
+                while len(self.send_queue) > 0:
+                    to_send = self.send_queue.pop(0)
+                    print "*", to_send
+                    self.udp_sock.sendto(to_send[0], to_send[1])
+            except socket.error:
+                raise
+            except KeyboardInterrupt:
+                raise
+
+    def main(self):
+        self.pool_handle_thread.start()
+        self.receive_handle_thread.start()
+        self.send_handle_thread.start()
+        try:
+            while self.alive:
+                pass
+        except KeyboardInterrupt:
+            self.alive = False
+            print 'Closing threads'
+        print 'Closing sockets'
+        while self.pool_handle_thread.isAlive() or self.receive_handle_thread.isAlive() or self.send_handle_thread.isAlive():
+            pass
+        self.udp_sock.close()
+        print 'Good Bye'
